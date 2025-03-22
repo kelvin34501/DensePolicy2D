@@ -15,20 +15,26 @@ from diffusers.optimization import get_cosine_schedule_with_warmup
 from termcolor import cprint
 
 from policy import DSP
-from dataset.realworld import RealWorldDataset, collate_fn
+
+# from dataset.realworld import RealWorldDataset, collate_fn
+from dataset.realworld_aloha import RealWorldDatasetALOHA, collate_fn
 from utils.training import set_seed, plot_history, sync_loss
 
-dataset = RealWorldDataset(
-    path = "data/rise/pour_2",
-    split = 'train',
-    num_obs = 1,
-    num_action =20,
-    voxel_size = 0.005,
-    aug = False,
-    aug_jitter = False, 
-    with_cloud = False,
-    with_obj_action = True,
-    no_project = True,
+dataset = RealWorldDatasetALOHA(
+    path="data/aloha/insert_flowers_bimanual",
+    split="train",
+    num_obs=1,
+    num_action=20,
+    voxel_size=0.005,
+    aug=False,
+    aug_jitter=False,
+    with_cloud=False,
+    with_obj_action=True,
+    no_project=True,
+    cam_ids=["high"],
+    hand_cam_id="left_wrist",
+    hand2_cam_id="right_wrist",
+    norm_stat_filepath="assets/norm_stat/insert_flowers_bimanual.pkl"
 )
 
 from tqdm import tqdm
@@ -46,10 +52,10 @@ for i in tqdm(range(len(dataset))):
     # print(torch.mean(dataitem['action_obj_normalized'][:, :3], axis=0))
 
     # input()
-    batch_list.append(dataitem['action_normalized'][:, :3]) # [20, 3]
+    batch_list.append(dataitem["action_normalized"][:])  # [20, 3]
 
 # stack at dim 0
-batch_list = torch.stack(batch_list, dim=0) # [N, 20, 3]
+batch_list = torch.stack(batch_list, dim=0)  # [N, 20, 3]
 
 # compute mean and std along N
 mean = torch.mean(batch_list, axis=0)

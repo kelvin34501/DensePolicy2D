@@ -175,3 +175,5 @@ cython_debug/
 
 /tmp/calib
 /tmp/*.tar.gz
+
+/assets/norm_stat
