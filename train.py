@@ -14,10 +14,11 @@ from diffusers.optimization import get_cosine_schedule_with_warmup
 from termcolor import cprint
 
 from policy import DSP
-from dataset.realworld import RealWorldDataset, collate_fn
+# from dataset.realworld import RealWorldDataset, collate_fn
+from dataset.realworld_aloha import RealWorldDatasetALOHA, collate_fn
 from utils.training import set_seed, plot_history, sync_loss
-from dataset.risereal import RealWorldDataset as RISERealworldDataset
-from dataset.risereal import collate_fn as risereal_collate_fn
+# from dataset.risereal import RealWorldDataset as RISERealworldDataset
+# from dataset.risereal import collate_fn as risereal_collate_fn
 
 default_args = edict({
     "data_path": "data/collect_pens",
@@ -70,68 +71,44 @@ def train(args_override):
 
     # dataset & dataloader
     if RANK == 0: 
-        print("Loading dataset ...")
-    if "rise_real" in args.data_path:
-        if RANK == 0: cprint(f"{args.data_path} is a RISE-Real dataset", 'yellow')
-        dataset = RISERealworldDataset(
-            path = args.data_path,
-            split = 'train',
-            num_obs = 1,
-            num_action = args.num_action,
-            voxel_size = args.voxel_size,
-            aug = args.aug,
-            aug_jitter = args.aug_jitter, 
-            with_cloud = False,
-            # TODO: no project
-        )
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, 
-            num_replicas = WORLD_SIZE, 
-            rank = RANK, 
-            shuffle = True
-        )
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size = args.batch_size // WORLD_SIZE,
-            num_workers = args.num_workers,
-            collate_fn = risereal_collate_fn,
-            sampler = sampler,
-            persistent_workers = True,
-        )
-    else:
-        dataset = RealWorldDataset(
-            path = args.data_path,
-            split = 'train',
-            num_obs = 1,
-            num_action = args.num_action,
-            voxel_size = args.voxel_size,
-            aug = args.aug,
-            aug_jitter = args.aug_jitter, 
-            with_cloud = False,
-            no_project = args.no_project,
-        )
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, 
-            num_replicas = WORLD_SIZE, 
-            rank = RANK, 
-            shuffle = True
-        )
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size = args.batch_size // WORLD_SIZE,
-            num_workers = args.num_workers,
-            collate_fn = collate_fn,
-            sampler = sampler,
-            persistent_workers = True,
-        )
+        print("Loading dataset ALOHA...")
+    dataset = RealWorldDatasetALOHA(
+        path = args.data_path,
+        split = 'train',
+        num_obs = 1,
+        num_action = args.num_action,
+        voxel_size = args.voxel_size,
+        aug = args.aug,
+        aug_jitter = args.aug_jitter, 
+        with_cloud = False,
+        no_project = args.no_project,
+        cam_ids=["high"],
+        hand_cam_id="left_wrist",
+        hand2_cam_id="right_wrist",
+        norm_stat_filepath="assets/norm_stat/insert_flowers_bimanual.pkl"
+    )
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset, 
+        num_replicas = WORLD_SIZE, 
+        rank = RANK, 
+        shuffle = True
+    )
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size = args.batch_size // WORLD_SIZE,
+        num_workers = args.num_workers,
+        collate_fn = collate_fn,
+        sampler = sampler,
+        persistent_workers = True,
+    )
 
     # policy
-    if RANK == 0: print("Loading ACT policy ...")
+    if RANK == 0: print("Loading DSP2D policy ...")
     policy = DSP(
         num_action = args.num_action,
         input_dim = 6,
         obs_feature_dim = args.obs_feature_dim,
-        action_dim = 10,
+        action_dim = 14,
         hidden_dim = args.hidden_dim,
         nheads = args.nheads,
         num_encoder_layers = args.num_encoder_layers,
@@ -187,14 +164,16 @@ def train(args_override):
             # cloud data processing
             imgtop = data['colors_list']
             imghand = data['hand_colors_list']
+            imghand2 = data['hand2_colors_list']
             action_data = data['action_normalized']
-            imgtop, imghand, action_data = imgtop.to(device), imghand.to(device), action_data.to(device)
+            imgtop, imghand, imghand2, action_data = imgtop.to(device), imghand.to(device), imghand2.to(device), action_data.to(device)
             
             obj_data = None
 
             
             loss = policy(imgtop=imgtop,
                             imghand=imghand,
+                            imghand2=imghand2,
                             actions = action_data,
                             batch_size = action_data.shape[0])
                 # backward

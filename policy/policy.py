@@ -14,7 +14,7 @@ class DSP(nn.Module):
         num_action=20,
         input_dim=6,
         obs_feature_dim=512,
-        action_dim=10,
+        action_dim=14,
         hidden_dim=512,
         nheads=8,
         num_encoder_layers=4,
@@ -31,6 +31,7 @@ class DSP(nn.Module):
         ])
         self.resnet18_cam1 = RestNet18()
         self.resnet18_cam2 = RestNet18()
+        self.resnet18_cam3 = RestNet18()
         self.num_action = num_action
         config = BertConfig(hidden_size=obs_feature_dim, num_attention_heads=8, intermediate_size=obs_feature_dim * 4, num_hidden_layers=4) 
         self.action_projection = nn.Linear(obs_feature_dim, action_dim)
@@ -39,19 +40,22 @@ class DSP(nn.Module):
         
 
         
-    def forward(self, imgtop, imghand, actions=None, batch_size=24):
+    def forward(self, imgtop, imghand, imghand2, actions=None, batch_size=24):
 
         batch_size, cam_len, height, width, channels = imgtop.shape
         imgtop = imgtop.float()/255.0
         imghand = imghand.float()/255.0
+        imghand2 = imghand2.float()/255.0
 
         imgtop_transformed = self.transform(imgtop.reshape(-1, channels, height, width))
         imghand_transformed = self.transform(imghand.reshape(-1, channels, height, width))
+        imghand2_transformed = self.transform(imghand2.reshape(-1, channels, height, width))
         
         imgtop_features = self.resnet18_cam1(imgtop_transformed)
         imghand_features = self.resnet18_cam2(imghand_transformed)
+        imghand2_features = self.resnet18_cam3(imghand2_transformed)
 
-        readout = torch.cat((imgtop_features, imghand_features), dim=-1)
+        readout = torch.cat((imgtop_features, imghand_features, imghand2_features), dim=-1)
         
         if actions is not None:
             condition =  readout.unsqueeze(1)
