@@ -26,8 +26,7 @@ import time
 import threading
 import math
 import threading
-
-
+import torchvision.transforms as T
 import sys
 sys.path.append("./")
 
@@ -133,6 +132,25 @@ def get_model_config(args):
                          'num_inference_timesteps': args.num_inference_timesteps,
                          'ema_power': args.ema_power
                          }
+    elif args.policy_class == "DensePolicy":
+        policy_config = {'lr': args.lr,
+                         'lr_backbone': args.lr_backbone,
+                         'backbone': args.backbone,
+                         'masks': args.masks,
+                         'weight_decay': args.weight_decay,
+                         'dilation': args.dilation,
+                         'position_embedding': args.position_embedding,
+                         'loss_function': args.loss_function,
+                         'chunk_size': args.chunk_size,     # 查询
+                         'camera_names': task_config['camera_names'],
+                         'use_depth_image': args.use_depth_image,
+                         'use_robot_base': args.use_robot_base,
+                         'observation_horizon': args.observation_horizon,
+                         'action_horizon': args.action_horizon,
+                         'num_inference_timesteps': args.num_inference_timesteps,
+                         'ema_power': args.ema_power
+                         }        
+
     else:
         raise NotImplementedError
 
@@ -157,8 +175,23 @@ def make_policy(policy_class, policy_config):
         policy = CNNMLPPolicy(policy_config)
     elif policy_class == 'Diffusion':
         policy = DiffusionPolicy(policy_config)
-    elif policy_class == "DensePolict":
-        policy = DSP(policy_config))
+    elif policy_class == "DensePolicy":
+        from policy import DSP
+        policy = DSP(
+            num_action = 16,
+            input_dim = 6,
+            obs_feature_dim = 768, # 256 * 3
+            action_dim = 14,
+            hidden_dim = 512,
+            nheads = 8,
+            num_encoder_layers = 4, # 4
+            num_decoder_layers = 7, # 7
+            dropout = 0.1,
+            enable_mba = False,
+            obj_dim = 9,
+        )
+        n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        print("Number of parameters: {:.2f}M".format(n_parameters / 1e6))
     else:
         raise NotImplementedError
     return policy
@@ -185,6 +218,11 @@ def get_depth_image(observation, camera_names):
 
 
 def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
+
+    file_path = '/mnt/homes/xinyu-ldap/DensePolicy2D/assets/norm_stat/insert_flowers_bimanual.pkl'
+    with open(file_path, 'rb') as file:
+        original_dis = pickle.load(file)
+
     global inference_lock
     global inference_actions
     global inference_timestep
@@ -234,15 +272,59 @@ def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
         # qpos_numpy = np.array(obs['qpos'])
 
         # 归一化处理qpos 并转到cuda
-        qpos = pre_pos_process(obs['qpos'])
-        qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
+        # qpos = pre_pos_process(obs['qpos'])
+        # qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
         # 当前图像curr_image获取图像
-        curr_image = get_image(obs, config['camera_names'])
+        # curr_image = get_image(obs, config['camera_names'])
+
+
+        colors, colors_hand_left, colors_hand_right = obs['images'][config['camera_names'][0]], obs['images'][config['camera_names'][1]], obs['images'][config['camera_names'][2]]
+        center_crop = T.Compose([
+            T.CenterCrop((720, 720)),
+            T.Resize((256, 256)), #  TODO???
+        ])
+        colors = torch.from_numpy(colors).unsqueeze(0).permute(0, 3, 1, 2)
+        colors_hand_left = torch.from_numpy(colors_hand_left).unsqueeze(0).permute(0, 3, 1, 2)
+        colors_hand_right = torch.from_numpy(colors_hand_right).unsqueeze(0).permute(0, 3, 1, 2)
+
+        colors = center_crop(colors)
+        colors_hand_left = center_crop(colors_hand_left)
+        colors_hand_right = center_crop(colors_hand_right)
+
+        colors = colors.permute(0, 2, 3, 1).squeeze(0).numpy()
+        colors_hand_left = colors_hand_left.permute(0, 2, 3, 1).squeeze(0).numpy()
+        colors_hand_right = colors_hand_right.permute(0, 2, 3, 1).squeeze(0).numpy()
+
+
+        colors = torch.from_numpy(colors).float()
+        colors = colors.unsqueeze(0).unsqueeze(1)
+        colors_hand_left = torch.from_numpy(colors_hand_left).float()
+        colors_hand_left = colors_hand_left.unsqueeze(0).unsqueeze(1)
+        colors_hand_rght = torch.from_numpy(colors_hand_rght).float()
+        colors_hand_rght = colors_hand_rght.unsqueeze(0).unsqueeze(1)
+        image_top = colors()
+        image_hand_left = colors_hand_left()
+        image_hand_right = colors_hand_rght()
+
+        '''
         curr_depth_image = None
         if args.use_depth_image:
-            curr_depth_image = get_depth_image(obs, config['camera_names'])
+            curr_depth_image = get_depth_image(obs, config['camera_names'])'''
         start_time = time.time()
-        all_actions = policy(curr_image, curr_depth_image, qpos)
+        # all_actions = policy(curr_image, curr_depth_image, qpos)
+        pred_raw_action = policy(
+            imgtop=colors,
+            imghand_left=colors_hand_left,
+            imghand_right=colors_hand_rght,
+            actions = None,
+            batch_size = 1,
+        ).squeeze(0).cpu().numpy()
+        
+        mean = original_dis['action_mean']
+        std = original_dis['action_std']
+        all_actions = pred_raw_action * std + mean
+
+
         end_time = time.time()
         print("model cost time: ", end_time -start_time)
         inference_lock.acquire()
@@ -269,7 +351,9 @@ def model_inference(args, config, ros_operator, save_episode=True):
     # print("model structure\n", policy.model)
     
     # 2 加载模型权重
+    '''
     ckpt_path = os.path.join(config['ckpt_dir'], config['ckpt_name'])
+
     state_dict = torch.load(ckpt_path)
     new_state_dict = {}
     for key, value in state_dict.items():
@@ -278,10 +362,16 @@ def model_inference(args, config, ros_operator, save_episode=True):
         if key in ["model.input_proj_next_action.weight", "model.input_proj_next_action.bias"]:
             continue
         new_state_dict[key] = value
-    loading_status = policy.deserialize(new_state_dict)
+
+    loading_status = policy.deserialize(new_state_dict)  
+
     if not loading_status:
         print("ckpt path not exist")
-        return False
+        return False'''
+    args.ckpt = "/mnt/homes/xinyu-ldap/DensePolicy2D/logs/aloha/insert_flowers_bimanual/DSP_policy_epoch_1000_seed_233.ckpt"
+    policy.load_state_dict(torch.load(args.ckpt), strict = False)
+    print("Checkpoint {} loaded.".format(args.ckpt))
+
 
     # 3 模型设置为cuda模式和验证模式
     policy.cuda()
@@ -339,6 +429,9 @@ def model_inference(args, config, ros_operator, save_episode=True):
                             if config['temporal_agg']:
                                 all_time_actions[[t], t:t + chunk_size] = all_actions
                         inference_lock.release()
+
+
+
                     if config['temporal_agg']:
                         actions_for_curr_step = all_time_actions[:, t]
                         actions_populated = np.all(actions_for_curr_step != 0, axis=1)
