@@ -11,8 +11,8 @@ import pickle
 import argparse
 from einops import rearrange
 
-from utils import compute_dict_mean, set_seed, detach_dict # helper functions
-from policy import ACTPolicy, CNNMLPPolicy, DiffusionPolicy
+from utils import set_seed # helper functions
+# from policy import ACTPolicy, CNNMLPPolicy, DiffusionPolicy
 import collections
 from collections import deque
 
@@ -176,7 +176,7 @@ def make_policy(policy_class, policy_config):
     elif policy_class == 'Diffusion':
         policy = DiffusionPolicy(policy_config)
     elif policy_class == "DensePolicy":
-        from policy import DSP
+        from densepolicy2d import DSP
         policy = DSP(
             num_action = 16,
             input_dim = 6,
@@ -187,7 +187,7 @@ def make_policy(policy_class, policy_config):
             num_encoder_layers = 4, # 4
             num_decoder_layers = 7, # 7
             dropout = 0.1,
-            enable_mba = False,
+            # enable_mba = False,
             obj_dim = 9,
         )
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -217,18 +217,15 @@ def get_depth_image(observation, camera_names):
     return curr_image
 
 
-def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
-
-    file_path = '/mnt/homes/xinyu-ldap/DensePolicy2D/assets/norm_stat/insert_flowers_bimanual.pkl'
-    with open(file_path, 'rb') as file:
-        original_dis = pickle.load(file)
+def inference_process(args, config, ros_operator, policy, original_dis, t, pre_action):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     global inference_lock
     global inference_actions
     global inference_timestep
     print_flag = True
-    pre_pos_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
-    pre_action_process = lambda next_action: (next_action - stats["action_mean"]) / stats["action_std"]
+    # pre_pos_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
+    # pre_action_process = lambda next_action: (next_action - stats["action_mean"]) / stats["action_std"]
     rate = rospy.Rate(args.publish_rate)
     while True and not rospy.is_shutdown():
         result = ros_operator.get_frame()
@@ -280,7 +277,7 @@ def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
 
         colors, colors_hand_left, colors_hand_right = obs['images'][config['camera_names'][0]], obs['images'][config['camera_names'][1]], obs['images'][config['camera_names'][2]]
         center_crop = T.Compose([
-            T.CenterCrop((720, 720)),
+            T.CenterCrop((480, 480)),
             T.Resize((256, 256)), #  TODO???
         ])
         colors = torch.from_numpy(colors).unsqueeze(0).permute(0, 3, 1, 2)
@@ -295,16 +292,22 @@ def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
         colors_hand_left = colors_hand_left.permute(0, 2, 3, 1).squeeze(0).numpy()
         colors_hand_right = colors_hand_right.permute(0, 2, 3, 1).squeeze(0).numpy()
 
+        #import cv2
+        #cv2.imshow("x", colors_hand_right)
+        #cv2.waitKey(0)
 
         colors = torch.from_numpy(colors).float()
         colors = colors.unsqueeze(0).unsqueeze(1)
+        colors = colors.to(device)
         colors_hand_left = torch.from_numpy(colors_hand_left).float()
         colors_hand_left = colors_hand_left.unsqueeze(0).unsqueeze(1)
-        colors_hand_rght = torch.from_numpy(colors_hand_rght).float()
-        colors_hand_rght = colors_hand_rght.unsqueeze(0).unsqueeze(1)
-        image_top = colors()
-        image_hand_left = colors_hand_left()
-        image_hand_right = colors_hand_rght()
+        colors_hand_left = colors_hand_left.to(device)
+        colors_hand_right = torch.from_numpy(colors_hand_right).float()
+        colors_hand_right = colors_hand_right.unsqueeze(0).unsqueeze(1)
+        colors_hand_right = colors_hand_right.to(device)
+        #image_top = colors
+        #image_hand_left = colors_hand_left
+        #image_hand_right = colors_hand_right
 
         '''
         curr_depth_image = None
@@ -314,26 +317,27 @@ def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
         # all_actions = policy(curr_image, curr_depth_image, qpos)
         pred_raw_action = policy(
             imgtop=colors,
-            imghand_left=colors_hand_left,
-            imghand_right=colors_hand_rght,
+            imghand=colors_hand_left,
+            imghand2=colors_hand_right,
             actions = None,
             batch_size = 1,
         ).squeeze(0).cpu().numpy()
         
         mean = original_dis['action_mean']
         std = original_dis['action_std']
-        all_actions = pred_raw_action * std + mean
-
+        # all_actions = pred_raw_action * std + mean
+        all_actions = pred_raw_action
 
         end_time = time.time()
         print("model cost time: ", end_time -start_time)
         inference_lock.acquire()
-        inference_actions = all_actions.cpu().detach().numpy()
+        # inference_actions = all_actions.cpu().detach().numpy()
+        inference_actions = all_actions
         if pre_action is None:
             pre_action = obs['qpos']
         # print("obs['qpos']:", obs['qpos'][7:])
         if args.use_actions_interpolation:
-            inference_actions = actions_interpolation(args, pre_action, inference_actions, stats)
+            inference_actions = actions_interpolation(args, pre_action, inference_actions, original_dis)
         inference_timestep = t
         inference_lock.release()
         break
@@ -368,7 +372,7 @@ def model_inference(args, config, ros_operator, save_episode=True):
     if not loading_status:
         print("ckpt path not exist")
         return False'''
-    args.ckpt = "/mnt/homes/xinyu-ldap/DensePolicy2D/logs/aloha/insert_flowers_bimanual/DSP_policy_epoch_1000_seed_233.ckpt"
+    args.ckpt = "./ckpt/DSP_policy_epoch_1000_seed_233.ckpt" # REPLACEME
     policy.load_state_dict(torch.load(args.ckpt), strict = False)
     print("Checkpoint {} loaded.".format(args.ckpt))
 
@@ -378,14 +382,17 @@ def model_inference(args, config, ros_operator, save_episode=True):
     policy.eval()
 
     # 4 加载统计值
-    stats_path = os.path.join(config['ckpt_dir'], config['ckpt_stats_name'])
+    # stats_path = os.path.join(config['ckpt_dir'], config['ckpt_stats_name'])
     # 统计的数据  # 加载action_mean, action_std, qpos_mean, qpos_std 14维
-    with open(stats_path, 'rb') as f:
-        stats = pickle.load(f)
+    # with open(stats_path, 'rb') as f:
+    #     stats = pickle.load(f)
 
     # 数据预处理和后处理函数定义
-    pre_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
-    post_process = lambda a: a * stats['qpos_std'] + stats['qpos_mean']
+    # pre_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
+    # post_process = lambda a: a * stats['qpos_std'] + stats['qpos_mean']
+    file_path = './norm_stat/insert_flowers_bimanual.pkl'
+    with open(file_path, 'rb') as file:
+        original_dis = pickle.load(file)
 
     max_publish_step = config['episode_len']
     chunk_size = config['policy_config']['chunk_size']
@@ -412,12 +419,12 @@ def model_inference(args, config, ros_operator, save_episode=True):
             while t < max_publish_step and not rospy.is_shutdown():
                 # start_time = time.time()
                 # query policy
-                if config['policy_class'] == "ACT":
+                if config['policy_class'] == "DensePolicy":
                     if t >= max_t:
                         pre_action = action
                         inference_thread = threading.Thread(target=inference_process,
                                                             args=(args, config, ros_operator,
-                                                                  policy, stats, t, pre_action))
+                                                                  policy, original_dis, t, pre_action))
                         inference_thread.start()
                         inference_thread.join()
                         inference_lock.acquire()
@@ -448,7 +455,8 @@ def model_inference(args, config, ros_operator, save_episode=True):
                             raw_action = all_actions[:, t % chunk_size]
                 else:
                     raise NotImplementedError
-                action = post_process(raw_action[0])
+                # action = post_process(raw_action[0])
+                action = raw_action[0] * original_dis["action_std"] + original_dis["action_mean"]
                 left_action = action[:7]  # 取7维度
                 right_action = action[7:14]
                 ros_operator.puppet_arm_publish(left_action, right_action)  # puppet_arm_publish_continuous_thread
@@ -765,12 +773,12 @@ class RosOperator:
 
 def get_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ckpt_dir', action='store', type=str, help='ckpt_dir', required=True)
+    parser.add_argument('--ckpt_dir', action='store', type=str, help='ckpt_dir', required=False)
     parser.add_argument('--task_name', action='store', type=str, help='task_name', default='aloha_mobile_dummy', required=False)
     parser.add_argument('--max_publish_step', action='store', type=int, help='max_publish_step', default=10000, required=False)
     parser.add_argument('--ckpt_name', action='store', type=str, help='ckpt_name', default='policy_best.ckpt', required=False)
     parser.add_argument('--ckpt_stats_name', action='store', type=str, help='ckpt_stats_name', default='dataset_stats.pkl', required=False)
-    parser.add_argument('--policy_class', action='store', type=str, help='policy_class, capitalize', default='ACT', required=False)
+    parser.add_argument('--policy_class', action='store', type=str, help='policy_class, capitalize', default='DensePolicy', required=False)
     parser.add_argument('--batch_size', action='store', type=int, help='batch_size', default=8, required=False)
     parser.add_argument('--seed', action='store', type=int, help='seed', default=0, required=False)
     parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', default=2000, required=False)
@@ -831,7 +839,7 @@ def get_arguments():
     parser.add_argument('--pos_lookahead_step', action='store', type=int, help='pos_lookahead_step',
                         default=0, required=False)
     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size',
-                        default=32, required=False)
+                        default=16, required=False)
     parser.add_argument('--arm_steps_length', action='store', type=float, help='arm_steps_length',
                         default=[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.2], required=False)
 
